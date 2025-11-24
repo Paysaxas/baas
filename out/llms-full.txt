@@ -1,0 +1,1092 @@
+# Accounts
+
+Management of customer accounts.
+
+Each Account represents an internal ledger object linked to a verified Customer (either Individual or Business).
+Accounts are used to hold balances, process payments, and manage compliance-related activity within the PaySaxas ecosystem.
+
+#### Definition
+
+* An Account is a unique financial record within the ledger associated with one verified customer.
+* Each account is created in a single currency and has its own lifecycle and identifiers (account ID, vIBAN, status).
+* Account types define operational purpose:
+  * ***Individual Account*** — created for individual (KYC) clients.
+  * ***Business Account*** — created for corporate (KYB) clients.
+
+Relationship:
+
+* One Customer many Accounts (1:N relationship).
+* An account cannot exist without a verified customer.
+* Account identifiers are immutable once created.
+
+#### Account Opening — Payloads & Responses
+
+Process for account creation, validation, and lifecycle management.
+
+| Method | Endpoint         | Description                                                                                     |
+| ------ | ---------------- | ----------------------------------------------------------------------------------------------- |
+| POST   | /accounts        | Creates a new account for a verified customer.                                                  |
+| GET    | /accounts        | Retrieves a list of all accounts associated with the verified customer.                         |
+| GET    | `/accounts/{id}` | Retrieves detailed information about a specific account (currency, balances, status, metadata). |
+
+#### Lifecycle & Status Flow
+
+| Status   | Description / Trigger                                                                           |
+| -------- | ----------------------------------------------------------------------------------------------- |
+| Inactive | Initial placeholder — account record created but not yet reserved or active.                    |
+| Reserved | Account structure reserved (currency assigned, ledger entry prepared). Awaiting KYC completion. |
+| Active   | Account verified and fully operational. Customer can send and receive payments.                 |
+| Closed   | Account manually closed due to offboarding, inactivity, or compliance decision.                 |
+
+#### Account Creation Flow
+
+To successfully create an account:
+
+1. Customer must exist — only verified KYC/KYB customers are eligible.
+
+2. Required fields:
+
+   * `customer_id` — unique verified customer reference.
+   * `currency` — supported currency code (ISO 4217).
+   * `account_type` — individual or business.
+
+3. Optional fields:
+
+   * `metadata` — internal information (purpose, label, internal reference).
+
+4. Validation:
+
+   * Account cannot be duplicated for the same customer–currency pair.
+   * Invalid or unsupported currency triggers `400 VALIDATION_ERROR`.
+
+5. Result
+   * On success, a new account object is created in a reserved inactive state, depending on the configuration.
+   * After successful verification, the account transitions to or active.
+
+#### Field Validation Requirements
+
+| Field         | Type   | Required | Rules                                         |
+| ------------- | ------ | -------- | --------------------------------------------- |
+| customer\_id  | string |          | Must belong to an existing verified customer. |
+| currency      | string |          | Must be supported (ISO 4217 format).          |
+| account\_type | string |          | Allowed values: Individual, business.         |
+| metadata      | object | optional | Custom parameters for internal use.           |
+
+#### Status Lifecycle Summary
+
+| Phase       | Statuses Included | Notes                                        |
+| ----------- | ----------------- | -------------------------------------------- |
+| Setup       | Void Reserved     | Account structure created and validated.     |
+| Operational | Active            | Account is ready for payments and reporting. |
+| Termination | Closed            | Manual deactivation or offboarding.          |
+
+#### vIBANs
+
+Operations for issuing and managing virtual IBANs linked to an account.
+
+| Method | Endpoint               | Description                                                |
+| ------ | ---------------------- | ---------------------------------------------------------- |
+| POST   | `/accounts/{id}/ibans` | Issues a new virtual IBAN linked to the specified account. |
+| GET    | `/accounts/{id}/ibans` | Returns all virtual IBANs associated with the account.     |
+
+IBANs are used to enable both incoming and outgoing payments for customer accounts.
+Each issued IBAN is uniquely linked to an account and can be used to receive SEPA transfers or initiate outgoing payments under the same customer
+profile.
+IBANs are generated in the Finnish format and include the relevant BIC identifier for the PaySaxas payment network.
+
+Each IBAN object contains structural and status information that allows clients to display and manage account identifiers within their own platforms.
+All IBANs issued through the API are safeguarded under the same regulatory and reconciliation rules as customer accounts.
+
+***Typical response fields include:***
+
+* iban — unique Finnish IBAN assigned to the account (e.g. FI2112345600000785)
+* bic — Bank Identifier Code (e.g. PAYSA0XXX)
+* currency — account currency (always "EUR")
+* status — current state of the IBAN (active, reserved, or closed)
+* created\_at — timestamp of issuance in ISO 8601 format
+  Example payloads demonstrate both successful issuance and potential error cases, such as validation failures or duplicate requests.
+
+```json
+{
+"iban": "DE00PAY0000000000",
+"bic": "PAYSA0XXX",
+"currency": "EUR",
+"status": "active",
+"created_at": "2025-01-15T10:00:00Z"
+}
+```
+
+> IBAN and BIC are examples only — not real financial identifiers.
+
+### Webhooks (Account events)
+
+
+# Customers
+
+#### Overview
+
+The Customers API manages personal (B2C) and business (B2B) clients within the PaySaxas ecosystem.
+Each customer represents a verified legal entity or natural person and has its own lifecycle, verification flow, and compliance context.
+
+> ***Multi-Entity Access Model***
+> A single login (email) can control multiple onboarded profiles:
+>
+> * ***Individual*** profile ( type: individual) — verified via KYC.
+> * ***Business*** profile(s) (type: business) — verified via KYB.
+>   Each profile receives its own , verification session, accounts, and webhook audit trail. customer\_id
+>   Data, accounts, and transactions are isolated per profile and never shared between and business contexts. individual
+>   Switching between profiles in the dashboard changes operational scope only — not data ownership.
+
+#### References
+
+<a href="https://www.fatf-gafi.org/content/dam/fatf-gafi/guidance/Guidance-on-Digital-Identity.pdf" target="_blank" rel="noopener noreferrer">
+  * FATF Guidance on Digital ID (2020)
+</a>
+
+<a href="https://www.eba.europa.eu/sites/default/files/document_library/Publications/Guidelines/2021/963637/Final%20Report%20on%20Guidelines%20on%20revised%20ML%20TF%20Risk%20Factors.pdf" target="_blank" rel="noopener noreferrer">
+  * EBA Guidelines on Customer Due Diligence (EBA/GL/2021/02)
+</a>
+
+### Customer Process Flow & Statuses
+
+This section describes the full lifecycle of a Customer within the PaySaxas system — from pre-registration to active client status, including compliance
+reviews, rejection cases, and offboarding.
+Flows differ for Individual and Corporate clients but follow the same regulatory and technical logic.
+
+Lifecycle Separation:
+
+> Individual customers move automatically through verification (auto transitions).
+> Corporate customers require manual actions for each step (manual transitions).
+> Each status change generates an auditable event and a webhook notification per customer\_id.
+
+### 2. Event Traceability
+
+Each status change triggers an auditable event and webhook notification:
+Contains only the unique customer identifier — no PII, statuses, or metadata are exposed.
+
+```json
+{
+  "event": "customer.status.changed",
+  "data": {
+    "id": "cust_92f3e1b9"
+  }
+}
+```
+
+Notes:
+
+* Webhooks contain no PII.
+* Signed using HMAC SHA-256 per RFC 2104.
+* Delivery retries up to 24h (max 3 attempts).
+* All transitions are logged immutably and are auditable by Compliance.
+
+### 3. Naming Convention
+
+> Status values use lowercase snake\_case.
+> type field defines customer flow (individual or business).
+
+```json
+{
+  "id": "cust_8b29e3",
+  "type": "business",
+  "status": "compliance_pending",
+  "created_at": "2025-10-30T10:31:00Z"
+}
+```
+
+### 4. Endpoints
+
+| Method | Endpoint          | Description                                     | Success     | Typical Errors                                                                                                 |
+| ------ | ----------------- | ----------------------------------------------- | ----------- | -------------------------------------------------------------------------------------------------------------- |
+| POST   | /customers        | Create a new customer (individual or business). | 201 Created | 400 VALIDATION\_ERROR, 401 UNAUTHORIZED, 403 INSUFFICIENT\_PERMISSIONS, 409 DUPLICATE\_CUSTOMER                |
+| GET    | /customers        | Retrieve a paginated list of customers.         | 200 OK      | 400 VALIDATION\_ERROR, 401 UNAUTHORIZED, 403 INSUFFICIENT\_PERMISSIONS                                         |
+| GET    | `/customers/{id}` | Retrieve customer details.                      | 200 OK      | 400 VALIDATION\_ERROR, 401 UNAUTHORIZED, 403 INSUFFICIENT\_PERMISSIONS, 404 CUSTOMER\_NOT\_FOUND               |
+| PATCH  | `/customers/{id}` | Update customer metadata or internal notes.     | 200 OK      | 400 VALIDATION\_ERROR, 401 UNAUTHORIZED, 403 INSUFFICIENT\_PERMISSIONS, 404 CUSTOMER\_NOT\_FOUND, 409 CONFLICT |
+
+#### Scopes
+
+* `customers:read` — list / retrieve
+* `customers:write` — create / update
+
+**Idempotency Header:** `X-Request-Id: <UUIDv4>`
+
+### Webhooks — Customer Events
+
+
+# Platform Glossary
+
+Definitions of common terms and abbreviations used throughout the documentation.
+
+| Term                          | Definition                                                                                                                        |
+| ----------------------------- | --------------------------------------------------------------------------------------------------------------------------------- |
+| Account                       | A financial ledger entity representing client funds; linked to a customer and supports balances, transactions, and virtual IBANs. |
+| Account ID                    | Unique identifier of an account in the PaySaxas system (e.g., `acc_12345`).                                                       |
+| API                           | Application Programming Interface — allows external systems to interact with PaySaxas services.                                   |
+| Authorization                 | The process of obtaining access rights via OAuth 2.1 (Client Credentials Grant).                                                  |
+| BIC                           | Bank Identifier Code — a unique code used for identifying banks in the SWIFT network.                                             |
+| Batch Payment                 | A scheduled or grouped payment containing multiple transactions submitted together.                                               |
+| Beneficiary                   | The recipient of a payment or transfer, identified by name and IBAN.                                                              |
+| Changelog                     | Record of updates, fixes, and new features released in each API version.                                                          |
+| Client Credentials Grant      | OAuth 2.1 authorisation flow using `client_id` and `client_secret` to obtain a token.                                             |
+| CSV                           | Comma-Separated Values — file format for exporting tabular data.                                                                  |
+| Customer                      | End-user entity (individual or business) managed under a client account.                                                          |
+| Deprecation                   | The process of phasing out old API versions or features before removal.                                                           |
+| Digest                        | SHA-256 hash header of a request body, used in JWS signing.                                                                       |
+| Event ID                      | Unique identifier assigned to each webhook event to ensure deduplication.                                                         |
+| EPC Codes                     | Error codes defined by the European Payments Council for SEPA transaction failures (e.g., AC01, AM04).                            |
+| FX (Foreign Exchange)         | Conversion of funds between currencies, including quotes, conversions, and settlements.                                           |
+| IBAN                          | International Bank Account Number — standard identifier for bank accounts in the SEPA zone.                                       |
+| Instant SEPA (SCT Inst)       | Real-time SEPA payment type with near-instant settlement (up to 100,000 EUR).                                                     |
+| JWS (JSON Web Signature)      | Compact signature format used for securing API requests (detached JWS mode).                                                      |
+| JWT (JSON Web Token)          | Access token format containing claims used in OAuth 2.1 authentication.                                                           |
+| KID (Key ID)                  | Identifier for a public key, used to support key rotation and signature verification.                                             |
+| KYC (Know Your Customer)      | Verification of identity for individual customers.                                                                                |
+| KYB (Know Your Business)      | Verification of identity for legal entities and business customers.                                                               |
+| Lifecycle                     | The sequence of states an entity (account, payment, customer) transitions through from creation to completion.                    |
+| Nonce                         | Random unique value used once per request to prevent replay attacks.                                                              |
+| OAuth 2.1                     | Authentication protocol used for secure access to PaySaxas APIs.                                                                  |
+| Observability                 | Monitoring, tracing, and logging of system activity for debugging and analytics.                                                  |
+| Payment ID                    | Unique identifier of a payment transaction (e.g., `pmt_12345`).                                                                   |
+| Reconciliation                | Daily process of matching balances and transactions between PaySaxas and external banking partners.                               |
+| Replay Protection             | Security mechanism preventing reuse of signed requests using time and nonce validation.                                           |
+| SCT (SEPA Credit Transfer)    | Standard SEPA euro payment between banks within the SEPA network.                                                                 |
+| SLA (Service Level Agreement) | Contractual commitment defining uptime, incident priorities, and response times.                                                  |
+| Status Page                   | Public page showing API system uptime, incidents, and maintenance notifications.                                                  |
+| Traceparent                   | HTTP header used for distributed tracing across systems and services.                                                             |
+| Transaction                   | A record of financial movement (incoming or outgoing) within an account.                                                          |
+| UUID                          | Universally Unique Identifier used as IDs for entities like customers or webhooks.                                                |
+| Verification of Payee (VoP)   | Name-check mechanism validating that the beneficiary’s account matches the intended recipient.                                    |
+| vIBAN (Virtual IBAN)          | Sub-IBAN linked to a main account for identifying incoming payments by payer or use case.                                         |
+| Webhook Callback              | Notification sent by PaySaxas to inform clients about system events (e.g., payment.settled).                                      |
+| Webhook Signature             | Cryptographic signature (HMAC/JWS) used to verify the authenticity of webhook messages.                                           |
+| JWKS (JSON Web Key Set)       | JSON structure containing a set of public keys used for verifying signatures.                                                     |
+| X-Request-Id                  | Header containing a unique identifier for correlating requests across systems.                                                    |
+| Digest Header                 | SHA-256 hash of the request body, required for JWS signature validation.                                                          |
+| Sunset Header                 | HTTP header indicating deprecation or end-of-support date for an API version.                                                     |
+| Retry Policy                  | Strategy for retrying failed webhook deliveries using exponential backoff.                                                        |
+| Sandbox                       | Testing environment that simulates production without using live data.                                                            |
+| API Versioning                | Mechanism for managing backward compatibility and introducing new endpoints (/v1, /v2, etc.).                                     |
+| Anti-Replay                   | Security measure ensuring a signed request cannot be reused after expiry.                                                         |
+| Trace ID                      | Unique identifier used for correlating logs and traces across requests.                                                           |
+| Incident                      | An event that disrupts normal API or platform operation, requiring support action.                                                |
+| Backoff Strategy              | Progressive delay mechanism for retrying failed webhooks or API requests.                                                         |
+
+
+# Overview
+
+## Introduction
+
+PaySaxas is a Banking-as-a-Service (BaaS) platform that enables fintechs, EMIs, PSPs, and digital businesses to build and launch financial products using a secure, modular infrastructure. The API lets clients onboard customers, open and manage accounts, move money, and automate operational or compliance workflows.
+
+The platform centres around a few core building blocks — customers, accounts, payments, and event notifications — so you can embed financial functionality directly into your product.
+
+## Core Use Cases
+
+* Onboard individual or business customers through a secure, API-driven flow.
+* Create and manage customer accounts with dedicated identifiers (IBANs or other supported formats).
+* Initiate and track incoming and outgoing payments across supported payment networks.
+* Receive asynchronous notifications about account or payment status updates.
+* Retrieve balances and transaction history programmatically.
+
+## Key Entities
+
+* **Customer** — an onboarded individual or company operating under your programme.
+* **Account** — a ledger account tied to a customer, with balances, statements, and virtual identifiers.
+* **Payment** — an outgoing or incoming transaction processed through supported payment rails.
+
+## Typical Flow
+
+1. Authenticate using OAuth 2.1 client credentials.
+2. Send a request to the relevant PaySaxas endpoint.
+3. Process the synchronous response.
+4. Listen for webhooks that confirm status changes.
+
+## Next Steps
+
+* Follow the Quickstart guide to obtain credentials and issue your first API requests.
+* Explore the Accounts, Payments, and Confirmation sections for detailed workflows.
+* Review the OpenAPI reference for full endpoint definitions.
+
+
+# Payments
+
+PaySaxas supports incoming (SEPA IN) and outgoing (SEPA OUT) euro-denominated payments through multiple regulated partner rails.
+Processing logic and reconciliation flow may vary per rail, but all providers follow the same unified transaction model and API schema.
+Internal routing, timing, and provider-level logic remain confidential and are not exposed in API documentation.
+
+All SEPA transfers share the same compliance, audit, and AML controls.
+Manual interventions may occur in exceptional cases (e.g., AML hold, compliance review, document request, or return processing).
+
+> Provider Abstraction Notice
+> Provider names, routing logic, and SLAs are strictly internal and never exposed in any public documentation, API payload, or
+> webhook event.
+> All SEPA flows use a unified PaySaxas schema that abstracts underlying providers.
+
+### SEPA IN (Incoming Transfers)
+
+#### Automated Flow (Standard Route)
+
+Incoming SEPA credits are processed through an automated pipeline that validates account ownership, applies AML screening, and credits funds upon
+successful verification.
+
+#### Typical sequence:
+
+Received Account Validation AML Screening Compliance Hold (if any) Safeguard Fee Deduction Settled (Completed)
+
+* Each stage represents an internal state transition within the PaySaxas system.
+* All funds are safeguarded during compliance screening.
+* Completed transactions automatically trigger webhook notifications.
+* No manual review occurs unless a compliance flag is raised.
+
+### SEPA OUT (Outgoing Transfers)
+
+**Automated Flow (Standard Route)**
+
+Outgoing SEPA transfers follow an automated lifecycle from order creation to settlement or return.
+Each stage ensures AML and regulatory compliance, liquidity validation, and reconciliation.
+
+#### Typical sequence:
+
+Payment Created AML Screening Execution Settlement Completed
+
+* Payments are executed via approved rails under PSD2 and SEPA guidelines.
+* Failures or rejections automatically trigger status updates and webhook events.
+* No provider-specific data (e.g., BICs, routing nodes) are ever exposed.
+
+### Endpoints
+
+#### Outgoing Payments (SEPA OUT)
+
+| Method | Endpoint                        | Description                                                                                                   |
+| ------ | ------------------------------- | ------------------------------------------------------------------------------------------------------------- |
+| POST   | /payments/sepa-credit-transfers | Creates a new outgoing SEPA Credit Transfer. Requires a JWS signature for authentication.                     |
+| GET    | /payments                       | Retrieves a list of outgoing payments filtered by parameters (status, date, accountId, type).                 |
+| GET    | `/payments/{id}`                | Returns detailed information about a specific outgoing payment (amount, status, EPC reason code, timestamps). |
+
+#### Incoming Payments (SEPA IN)
+
+| Method | Endpoint             | Description                                                                                                                        |
+| ------ | -------------------- | ---------------------------------------------------------------------------------------------------------------------------------- |
+| GET    | /transactions        | Lists all incoming transactions (SEPA IN, internal transfers, refunds). Supports filters by account, date range, type, and status. |
+| GET    | `/transactions/{id}` | Retrieves full transaction details by transaction ID, including status, amount, currency, and reference.                           |
+
+> Incoming SEPA transfers are created automatically upon receipt from partner banks and are read-only in the API.
+
+#### Webhooks (Payment & Transaction Events)
+
+### How SEPA Flows Appear in API
+
+| Flow Type          | API Section                            | Endpoint Family | Webhook Events                                                     | Data Visibility                   |
+| ------------------ | -------------------------------------- | --------------- | ------------------------------------------------------------------ | --------------------------------- |
+| SEPA IN            | /transactions                          | Read-only       | transaction.received                                               | Balance and history only          |
+| SEPA OUT           | /payments                              | Read/Write      | payment.created, payment.settled, payment.failed, payment.returned | Status, reason, reference, amount |
+| Export / Reporting | /transactions/export, /payments/export |                 |                                                                    | Read-only — Aggregated statements |
+| Async Monitoring   | /webhooks — All events above           |                 |                                                                    | Only entity IDs                   |
+
+
+# Transactions
+
+The Transactions API provides a read-only history of all financial movements — incoming and outgoing.
+Each transaction belongs to an account, which belongs to a verified customer.
+Transactions are immutable and safely abstracted from internal provider logic.
+
+### Unified Lifecycle (Abstracted from Provider Workflows)
+
+PaySaxas integrates multiple regulated payment providers.
+Each provider (e.g., SEPA IN/OUT gateways, internal ledgers) has its own routing, AML, and exception flow.
+However, the public API exposes a single normalised status model:
+
+| Status       | Description                                     |
+| ------------ | ----------------------------------------------- |
+| pending      | Transaction created and awaiting confirmation.  |
+| in\_progress | Processing by payment rails or internal ledger. |
+| completed    | Funds successfully settled.                     |
+| failed       | Payment rejected or not processed.              |
+| reversed     | Transaction refunded, reversed, or returned.    |
+
+> Internal routing (e.g., “AML Review”, “Finance Freeze”, “Settlement Exception”) is never exposed in API responses.
+> Provider-specific transitions are aggregated into these unified statuses.
+
+### Endpoints
+
+| Method | Endpoint             | Description                                            |
+| ------ | -------------------- | ------------------------------------------------------ |
+| GET    | /transactions        | Returns a list of transactions filtered by parameters. |
+| GET    | `/transactions/{id}` | Returns full transaction details.                      |
+
+| Method | Endpoint             | Link                                                    |
+| ------ | -------------------- | ------------------------------------------------------- |
+| GET    | /transactions        | GET /transactions — List Transactions                   |
+| GET    | `/transactions/{id}` | GET `/transactions/{id}` — Retrieve Transaction Details |
+
+### Webhooks — Transaction Events
+
+
+# Deprecation Policy
+
+This section defines the process of retiring old API versions or endpoints.
+Deprecation ensures backward compatibility while allowing PaySaxas to introduce new features, improve security, and maintain compliance.
+
+##### Minimum Notice Period
+
+A minimum deprecation notice period of 90 days is provided before any API version or endpoint is retired.
+During this period, all existing integrations continue to function normally. Clients are expected to plan migration to the latest version before the announced
+sunset date.
+
+##### Communication Channels
+
+All deprecation announcements are delivered through official communication channels:
+
+* Email notifications to registered developers and administrators
+* Dashboard or in-app alerts within the client portal
+* API response headers indicating deprecation status
+* Updates in release notes and API changelog
+
+Each announcement clearly states the affected version or endpoint, the sunset timeline, and the link to the official documentation page with migration
+instructions.
+
+##### Deprecation Header Example
+
+When an endpoint is marked for deprecation, API responses include standard HTTP headers:
+
+```http
+Deprecation: true
+Sunset: Tue, 24 Dec 2025 00:00:00 GMT
+Link: <https://docs.paysaxas.com/deprecations>; rel="deprecation"
+```
+
+* Deprecation: Indicates that the endpoint or version is scheduled for deprecation.
+* Sunset: Specifies the date and time when the deprecated endpoint will be permanently removed.
+* Link: Provides a reference to the detailed deprecation notice and migration guide.
+
+##### Deprecation Phases
+
+The deprecation process follows four structured phases to ensure a smooth transition:
+
+* Announcement — The affected endpoint or version is marked as deprecated, and clients are notified via all official channels.
+* Support — The deprecated version remains fully operational but receives only critical bug and security fixes.
+* Sunset — Limited functionality period. Warnings may appear in API responses, and non-critical support may cease.
+* Removal — The version or endpoint is fully disabled and no longer available in production.
+
+##### Client Responsibilities
+
+Clients are expected to:
+
+* Monitor PaySaxas release notes and deprecation announcements regularly.
+* Migrate integrations to the latest supported API version before the Sunset phase.
+* Update SDKs, webhooks, and internal references to ensure continued compatibility.
+* Validate all business-critical flows in staging before switching to the new version.
+
+Failure to migrate before the removal date may result in service interruption for deprecated endpoints.
+
+
+# Errors & Troubleshooting
+
+Standardise how API errors are structured, surfaced, and handled by integrators while maintaining full data privacy and compliance with security guidelines.
+
+## Unified Error Response Format
+
+Used for client-side validation, authorisation, or permission issues (4xx) and internal or provider errors (5xx).
+Structure is aligned with RFC 7807 – Problem Details for HTTP APIs.
+
+> Note:
+> 5xx responses include only a generic message.
+> Internal identifiers, stack traces, or provider details are never exposed.
+
+```json
+{
+  "error_code": "validation_error",
+  "error_name": "Validation Error",
+  "error_description": "Invalid IBAN format.",
+  "metadata": {
+    "trace_id": "abc123",
+    "details": "Field 'beneficiary.iban' must match SEPA pattern"
+  }
+}
+```
+
+### Field Description
+
+| Field                 | Type   | Description                                                                                           |
+| --------------------- | ------ | ----------------------------------------------------------------------------------------------------- |
+| `error_code`          | string | Machine-readable error identifier (e.g. validation\_error, unauthorized, insufficient\_funds).        |
+| `error_name`          | string | Human-readable, capitalised error name.                                                               |
+| `error_description`   | string | Short, human-readable summary of the problem.                                                         |
+| `metadata (optional)` | object | Contextual data for debugging (non-sensitive). May include trace\_id, details, or other non-PII info. |
+
+### Error Categories
+
+| Category | Range     | Description                                                                              | Examples                                   |
+| -------- | --------- | ---------------------------------------------------------------------------------------- | ------------------------------------------ |
+| 4xx      | `400–499` | Client issues such as invalid payload, missing headers, or authentication errors.        | `400 VALIDATION_ERROR`, `401 UNAUTHORIZED` |
+| 5xx      | `500–599` | Internal or provider-side failures. Message is generic; no stack traces or vendor names. | `500 INTERNAL_ERROR`                       |
+
+> Status code definitions follow RFC 9110 – HTTP Semantics.
+
+### Standard Error Codes
+
+| Code                       | HTTP        | Meaning                                              | Typical Resolution                                     |
+| -------------------------- | ----------- | ---------------------------------------------------- | ------------------------------------------------------ |
+| `VALIDATION_ERROR`         | `400 / 422` | Field validation failed.                             | Check schema, types, and mandatory fields.             |
+| `INVALID_SIGNATURE`        | `400`       | JWS or HMAC signature verification failed.           | Regenerate the signature using the correct secret.     |
+| `UNAUTHORIZED`             | `401`       | Missing or invalid OAuth token.                      | Request a new OAuth 2.1 token and retry.               |
+| `INSUFFICIENT_PERMISSIONS` | `403`       | Token scope does not allow the action.               | Use the correct scope (for example, `payments:write`). |
+| `RESOURCE_NOT_FOUND`       | `404`       | Entity not found (customer, account, payment, etc.). | Verify the resource ID or creation step.               |
+| `INSUFFICIENT_FUNDS`       | `409`       | Balance too low to complete the request.             | Retry after top-up or use another account.             |
+| `INTERNAL_ERROR`           | `500`       | Unexpected server error.                             | Retry later or contact support with logs.              |
+| `PROVIDER_UNAVAILABLE`     | `502`       | Downstream provider temporarily offline.             | Retry with exponential backoff.                        |
+
+## Example Responses
+
+### Validation Error
+
+```json
+{
+  "error_code": "validation_error",
+  "error_name": "Validation Error",
+  "error_description": "Invalid IBAN format.",
+  "metadata": {
+  "trace_id": "abc123",
+    "details": "Field 'beneficiary.iban' must match SEPA pattern"
+  }
+}
+```
+
+### Idempotency Conflict
+
+```json
+{
+  "error_code": "idempotency_conflict",
+  "error_name": "Idempotency Conflict",
+  "error_description": "Different payload detected for the same X-Request-Id within the idempotency window.",
+  "metadata": {
+    "trace_id": "def456"
+  }
+}
+```
+
+### Insufficient Funds
+
+```json
+{
+  "error_code": "insufficient_funds",
+  "error_name": "Insufficient Funds",
+  "error_description": "Not enough balance to complete the operation.",
+  "metadata": {
+    "trace_id": "ghi789"
+  }
+}
+```
+
+### Server Error (generic)
+
+```json
+{
+  "error_code": "internal_error",
+  "error_name": "Internal Server Error",
+  "error_description": "An unexpected error occurred.",
+  "metadata": {
+    "trace_id": "zzz111"
+  }
+}
+```
+
+> Note:
+> The details field is only returned for 4xx responses.
+> All examples use synthetic data.
+
+
+# Idempotency & Safe Retries
+
+To reliably trace operations and prevent accidental duplicate submissions, PaySaxas requires a unique client-supplied request identifier for all write
+operations.
+
+#### Header
+
+Each write request must include a unique identifier:
+
+`X-Request-Id: UUIDv4`
+
+> PaySaxas logs each X-Request-Id for traceability and audit purposes.
+> The same structure will be used for future idempotent write support.
+
+#### Recommended client practices
+
+* Generate a UUIDv4 per write request (POST, PUT, PATCH, DELETE).
+* Do not reuse an ID across different operations or payloads.
+* Log and propagate X-Request-Id throughout your systems to enable debugging and monitoring.
+* Retry network or timeout errors using a new X-Request-Id.
+
+#### Example
+
+```bash
+curl -X POST https://api.paysaxas.com/v1/payments \
+-H "Authorization: Bearer <ACCESS_TOKEN>" \
+-H "Content-Type: application/json" \
+-H "X-Request-Id: 550e8400-e29b-41d4-a716-446655440000" \
+-d '{
+"debtor_account_id": "acc_123",
+"amount": "100.00",
+"currency": "EUR",
+"reference": "INV-1001",
+"counterparty": {
+"iban": "FI0212030000000202051",
+"name": "ACME Oy"
+}
+}'
+```
+
+> Note:
+> Full idempotent behaviour (automatic deduplication of repeated requests with the same X-Request-Id) will be introduced in a later
+> API release.
+
+
+# OpenAPI / Postman
+
+Tools to speed up integration with the PaySaxas API.
+All files are versioned and match the latest public API release.
+
+#### Downloads
+
+* Postman collection: `/downloads/paysaxas.postman_collection.json`
+* OpenAPI schema (YAML): `/downloads/paysaxas.openapi.yaml`
+* OpenAPI schema (JSON): `/downloads/paysaxas.openapi.json`
+
+#### Using the OpenAPI
+
+* The schema fully describes all endpoints, parameters, and response models.
+* Each change in the public API is versioned and reflected in the OpenAPI definition.
+* Use the schema in Postman, Swagger UI, or any compatible client.
+
+#### Postman — Quick Start
+
+* Download the collection.
+* In Postman: go to Import File select paysaxas.postman\_collection.json.
+* Create an Environment with variables (example):
+
+```text
+baseUrl = https://api.paysaxas.com
+client_id = YOUR_CLIENT_ID
+client_secret = YOUR_CLIENT_SECRET
+access_token = <filled after auth>
+```
+
+* Obtain a token using POST /oauth/token (Client Credentials).
+* Run requests — Postman will automatically inject
+  `Authorization: Bearer {{access_token}}.`
+
+#### cURL Examples
+
+##### Obtain token
+
+```bash
+curl -X POST https://api.paysaxas.com/oauth/token \
+-H "Content-Type: application/json" \
+-d '{
+"client_id": "YOUR_CLIENT_ID",
+"client_secret": "YOUR_CLIENT_SECRET",
+"grant_type": "client_credentials",
+"scope": "accounts:read"
+}'
+```
+
+##### List accounts
+
+```bash
+curl -X GET https://api.paysaxas.com/v1/accounts \
+-H "Authorization: Bearer <ACCESS_TOKEN>"
+```
+
+Example response:
+
+```json
+{
+"data": [
+{
+"id": "acc_001",
+"status": "active",
+"currency": "EUR",
+"created_at": "2025-10-21T10:30:45Z"
+},
+{
+"id": "acc_002",
+"status": "active",
+"currency": "EUR",
+"created_at": "2025-10-20T14:18:12Z"
+}
+],
+"pagination": {
+"next_cursor": "eyJpZCI6ImFjYzAwMiJ9",
+"has_more": true,
+"page_size": 2
+}
+}
+```
+
+##### Create payment (idempotent)
+
+```bash
+curl -X POST https://api.paysaxas.com/v1/payments \
+-H "Authorization: Bearer <ACCESS_TOKEN>" \
+-H "Content-Type: application/json" \
+-H "X-Request-Id: <UUIDv4>" \
+-d '{
+"debtor_account_id": "acc_123",
+"amount": "100.00",
+"currency": "EUR",
+"reference": "INV-1001",
+"counterparty": {
+"iban": "FI2112345600000785",
+"name": "ACME Oy"
+}
+}'
+```
+
+Example response:
+
+```json
+{
+"id": "pay_001",
+"status": "pending",
+"amount": "100.00",
+"currency": "EUR"
+}
+```
+
+
+# Operational
+
+#### Deprecation Policy
+
+Defines the process of retiring old API versions or endpoints.
+
+Must include:
+
+* Minimum deprecation notice period (e.g. 90 days).
+* Communication channels (email, dashboard, API header warnings).
+* Deprecation header example:
+
+```http
+Deprecation: true
+Sunset: Tue, 24 Dec 2025 00:00:00 GMT
+Link: <https://docs.paysaxas.com/deprecations>; rel="deprecation"
+```
+
+* Phases: announcement support sunset removal.
+* Expected client actions during each phase.
+
+
+# Pagination
+
+PaySaxas API uses cursor-based pagination to efficiently handle large result sets and ensure consistent responses when listing resources.
+
+## Purpose
+
+Standardise how large datasets are retrieved and paginated in API responses.
+
+## Supported Pagination Styles
+
+| Style        | Parameters        | When to use                                                                                          |
+| ------------ | ----------------- | ---------------------------------------------------------------------------------------------------- |
+| Cursor-based | `cursor`, `limit` | Preferred for frequently changing or high-volume datasets. Ensures stable ordering between requests. |
+
+## Common Query Parameters
+
+| Parameter | Type    | Applies to              | Description / Example                                                  |
+| --------- | ------- | ----------------------- | ---------------------------------------------------------------------- |
+| `limit`   | integer | all                     | Max items per page (`default: 20`, `max: 100`). Example: `?limit=50`.  |
+| `cursor`  | string  | all (cursor pagination) | Encoded pointer to the next page. Example: `?cursor=eyJpZCI6IjEyMyJ9`. |
+
+Example request
+
+```
+GET /v1/accounts?limit=
+```
+
+Response
+
+```json
+{
+  "data": [
+    {
+      "id": "acc_002",
+      "iban": "FI02PAY000000000002",
+      "status": "active",
+      "created_at": "2025-10-21T10:30:45Z"
+    },
+    {
+      "id": "acc_001",
+      "iban": "FI02PAY000000000001",
+      "status": "active",
+      "created_at": "2025-10-20T14:18:12Z"
+    }
+  ],
+  "pagination": {
+    "next_cursor": "eyJpZCI6ImZpbnBheTAwMDAwMDAwMDAxIn0=",
+    "has_more": true,
+    "page_size": 2
+  }
+}
+```
+
+> Security Note:
+> All identifiers (id, iban, cursor) are non-sensitive placeholders.
+> Real account or IBAN values are never exposed in documentation, examples, or logs.
+> Only structural patterns are demonstrated.
+
+## Pagination metadata
+
+| Field                       | Type    | Description                                                                |
+| --------------------------- | ------- | -------------------------------------------------------------------------- |
+| next\_cursor                | string  | Encoded pointer to request the next page. Example: `?cursor=<next_cursor>` |
+| previous\_cursor (optional) | string  | Encoded pointer to request the previous page (if supported).               |
+| has\_more (optional)        | boolean | Indicates if additional pages exist.                                       |
+| page\_size (optional)       | integer | Number of items returned in this response.                                 |
+
+## Best Practices for Integrators
+
+1. Always use cursor and limit parameters for paginated results.
+2. Do not combine offset and cursor in any request.
+3. Validate that limit stays within the allowed range (default: 20, max: 100).
+4. Always check for next\_cursor in responses before fetching the next page.
+5. Use created\_after and created\_before for date range filters.
+6. Use UTC timestamps in ISO 8601 format
+7. Avoid exposing cursor tokens in client-side URLs, logs, or analytics.
+8. When exporting large datasets, prefer asynchronous or paginated exports.
+
+
+# Safeguarding
+
+> No public API endpoints.
+
+Client funds are protected and maintained in segregated safeguarding accounts in accordance with the requirements of the Electronic Money Directive
+(EMD2) and the Payment Services Directive (PSD2).
+These accounts are fully separated from the company’s operational funds and held with authorised banking partners.
+
+Regular reconciliations and regulatory reports are performed to ensure compliance, accuracy, and transparency in safeguarding processes.
+All safeguarding activities are subject to ongoing internal monitoring and external audits in line with applicable regulations.
+
+Internal settlement flows, banking structures, and safeguarding counterparties are confidential and are not disclosed in public documentation
+
+
+# Security & Signing
+
+## Authentication (OAuth 2.1)
+
+PaySaxas API uses OAuth 2.1 with the Client Credentials grant for server-to-server integrations. Clients obtain a short-lived access token and include it
+in the Authorization header of each request.
+
+#### Token endpoint
+
+```http
+POST /oauth/token
+Content-Type: application/json
+```
+
+#### Request body
+
+```json
+{
+"client_id": "YOUR_CLIENT_ID",
+"client_secret": "YOUR_CLIENT_SECRET",
+"grant_type": "client_credentials",
+"scope": "accounts:read payments:write"
+}
+```
+
+> client\_secret is a placeholder. Never include secrets in logs, URLs, screenshots, or client-side code.
+
+#### Successful response
+
+```json
+{
+"access_token": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...",
+"token_type": "Bearer",
+"expires_in": 3600,
+"scope": "accounts:read payments:write"
+}
+```
+
+> access\_token — token to use in API calls.
+> token\_type — always Bearer.
+> expires\_in — token lifetime in seconds (short-lived; check this value in the response).
+> scope — granted scopes.
+
+> Note: The Client Credentials grant does not issue refresh or reset tokens.
+> When the access token expires, request a new one using the same client credentials.
+
+#### Using the token
+
+Include the token in the Authorization header:
+
+`Authorization: Bearer <access_token>`
+
+##### cURL example
+
+```bash
+curl -X POST https://api.paysaxas.com/oauth/token \\
+-H "Content-Type: application/json" \\
+-d '{
+"client_id":"YOUR_CLIENT_ID",
+"client_secret":"YOUR_CLIENT_SECRET",
+"grant_type":"client_credentials",
+"scope":"accounts:read payments:write"
+}'
+```
+
+#### Scopes
+
+Scopes restrict API access to the minimum required permissions. Example scopes:
+
+* accounts:read
+* accounts:write
+* payments:read
+* payments:write
+
+Requests to endpoints outside the granted scopes will be rejected.
+
+#### Token lifetime & refresh
+
+* Access tokens are short-lived. Use the expires\_in value to determine expiry.
+* For server-to-server flows, obtain a new token by calling POST /oauth/token again when the current token expires (refresh tokens are not  issued for the Client Credentials grant).
+
+#### Error handling
+
+> 401 UNAUTHORIZED — missing, invalid, or expired token:
+
+```json
+{
+"error": "unauthorized",
+"error_description": "Invalid or expired access token"
+}
+```
+
+> 400 INVALID\_CLIENT — incorrect or unknown client credentials:
+
+```json
+{
+"error": "invalid_client",
+"error_description": "Client authentication failed"
+}
+```
+
+> 400 INVALID\_SCOPE — unknown or disallowed scope:
+
+```json
+{
+"error": "invalid_scope",
+"error_description": "One or more scopes are not permitted"
+}
+```
+
+> 403 INSUFFICIENT\_PERMISSIONS — valid token, but missing required permission or scope:
+
+```json
+{
+"error": "insufficient_permissions",
+"error_description": "Token scope does not permit this action"
+}
+```
+
+
+# Versioning & Lifecycle
+
+PaySaxas API uses versioning to ensure backward compatibility and predictable integration for all clients.
+Each version introduces improvements or new functionality while maintaining stability for existing implementations.
+
+## Versioning strategy
+
+All API endpoints are versioned using a clear and consistent structure (for example, /v1/, /v2/, etc.).
+Each version represents a defined stage of the API lifecycle — from initial release to deprecation.
+
+## Specifying the version
+
+Clients specify the API version via the URL path:
+
+`https://api.paysaxas.com/v1/...`
+
+> Only URL-based versioning is supported in PaySaxas API.
+> This approach ensures simplicity, transparency, and compatibility across all client environments.
+
+## Deprecation policy
+
+When a version is scheduled for deprecation, PaySaxas provides advance notice through:
+
+* Developer updates and release notes.
+* Deprecation warnings in API responses (e.g., custom headers or metadata fields).
+
+Deprecated versions remain available for a defined transition period before being retired.
+
+> Clients are expected to monitor release notes and migrate to newer versions as part of their regular maintenance cycle.
+
+#### Version announcements
+
+New API versions, feature releases, and deprecation timelines are announced via official PaySaxas communication channels, including:
+
+* API documentation changelogs
+* Developer newsletters
+* Email notifications
+* Platform update pages
+
+
+# Створити платіж (SWIFT або SEPA)
+
+{/* This file was generated by Fumadocs. Do not edit this file directly. Any changes should be made by running the generation command again. */}
+
+<APIPage document={"./openapi/api.yaml"} operations={[{"path":"/payments/createpayment","method":"post"}]} webhooks={[]} hasHead={false} />
+
+
+# Деталі конкретного платежу
+
+{/* This file was generated by Fumadocs. Do not edit this file directly. Any changes should be made by running the generation command again. */}
+
+<APIPage document={"./openapi/api.yaml"} operations={[{"path":"/payments/getpayment","method":"post"}]} webhooks={[]} hasHead={false} />
+
+
+# Перевірити наявність згоди PSU
+
+{/* This file was generated by Fumadocs. Do not edit this file directly. Any changes should be made by running the generation command again. */}
+
+<APIPage document={"./openapi/api.yaml"} operations={[{"path":"/accounts/checkconsent","method":"post"}]} webhooks={[]} hasHead={false} />
+
+
+# Видалити згоду PSU
+
+{/* This file was generated by Fumadocs. Do not edit this file directly. Any changes should be made by running the generation command again. */}
+
+<APIPage document={"./openapi/api.yaml"} operations={[{"path":"/accounts/deleteconsent","method":"post"}]} webhooks={[]} hasHead={false} />
+
+
+# Отримати список платежів за період
+
+{/* This file was generated by Fumadocs. Do not edit this file directly. Any changes should be made by running the generation command again. */}
+
+<APIPage document={"./openapi/api.yaml"} operations={[{"path":"/payments/getpayments","method":"post"}]} webhooks={[]} hasHead={false} />
+
+
+# Деталі одного рахунку
+
+{/* This file was generated by Fumadocs. Do not edit this file directly. Any changes should be made by running the generation command again. */}
+
+<APIPage document={"./openapi/api.yaml"} operations={[{"path":"/accounts/getaccount","method":"post"}]} webhooks={[]} hasHead={false} />
+
+
+# Виписка за період
+
+{/* This file was generated by Fumadocs. Do not edit this file directly. Any changes should be made by running the generation command again. */}
+
+<APIPage document={"./openapi/api.yaml"} operations={[{"path":"/accounts/getstatement","method":"post"}]} webhooks={[]} hasHead={false} />
+
+
+# Деталі конкретної транзакції
+
+{/* This file was generated by Fumadocs. Do not edit this file directly. Any changes should be made by running the generation command again. */}
+
+<APIPage document={"./openapi/api.yaml"} operations={[{"path":"/accounts/gettransaction","method":"post"}]} webhooks={[]} hasHead={false} />
+
+
+# Отримати список рахунків PSU
+
+{/* This file was generated by Fumadocs. Do not edit this file directly. Any changes should be made by running the generation command again. */}
+
+<APIPage document={"./openapi/api.yaml"} operations={[{"path":"/accounts/getaccounts","method":"post"}]} webhooks={[]} hasHead={false} />
